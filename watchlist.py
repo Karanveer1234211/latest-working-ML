@@ -519,6 +519,50 @@ OUTPUT_COLUMN_ORDER = [
 ]
 
 
+def _sanitize_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """Make a DataFrame safe for openpyxl. Excel does not support:
+      - tz-aware datetimes  -> strip tz (convert to tz-naive)
+      - mixed object cols where some cells are pd.Timestamp -> ISO strings
+      - pd.NA / pd.NaT in some object columns -> convert to None
+
+    Without this sanitisation, openpyxl raises mid-write and leaves the
+    file blank/partial.
+    """
+    out = df.copy()
+    for col in out.columns:
+        s = out[col]
+        # tz-aware datetime64 column -> tz-naive
+        try:
+            if pd.api.types.is_datetime64_any_dtype(s):
+                if getattr(s.dt, "tz", None) is not None:
+                    out[col] = s.dt.tz_localize(None)
+                continue
+        except Exception:
+            pass
+        # object column with any tz-aware Timestamp cells -> ISO strings
+        if s.dtype == object:
+            non_null = s.dropna()
+            if len(non_null) > 0:
+                has_tz_ts = non_null.apply(
+                    lambda x: isinstance(x, pd.Timestamp) and x.tzinfo is not None
+                ).any()
+                has_naive_ts = non_null.apply(
+                    lambda x: isinstance(x, pd.Timestamp) and x.tzinfo is None
+                ).any()
+                if has_tz_ts or has_naive_ts:
+                    def _conv(x):
+                        if isinstance(x, pd.Timestamp):
+                            return x.tz_localize(None).isoformat() if x.tzinfo else x.isoformat()
+                        return x
+                    out[col] = s.apply(_conv)
+        # Replace pd.NA with None so openpyxl writes blank cells, not "<NA>"
+        try:
+            out[col] = out[col].where(out[col].notna(), None)
+        except Exception:
+            pass
+    return out
+
+
 def write_outputs(watchlist: pd.DataFrame, run_ts: pd.Timestamp):
     cols = [c for c in OUTPUT_COLUMN_ORDER if c in watchlist.columns]
     extra = [c for c in watchlist.columns if c not in cols]
@@ -530,9 +574,16 @@ def write_outputs(watchlist: pd.DataFrame, run_ts: pd.Timestamp):
     df = df.sort_values(["__sp", "signal_date", "probability"],
                           ascending=[True, False, False]).drop(columns="__sp")
 
+    # 1. Parquet snapshot (preserves full type fidelity)
     df.to_parquet(SNAPSHOT_PARQUET, index=False)
     print(f"[out] {SNAPSHOT_PARQUET}")
 
+    # 1b. CSV snapshot (human-friendly mirror of the parquet)
+    csv_path = WATCHLIST_DIR / "watchlist.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"[out] {csv_path}")
+
+    # 2. Append-only history
     df_hist = df.copy()
     df_hist.insert(0, "run_ts", run_ts)
     if HISTORY_PARQUET.exists():
@@ -547,33 +598,50 @@ def write_outputs(watchlist: pd.DataFrame, run_ts: pd.Timestamp):
     combined.to_parquet(HISTORY_PARQUET, index=False)
     print(f"[out] {HISTORY_PARQUET}  (cumulative rows: {len(combined):,})")
 
+    # 3. XLSX (sanitised: tz-aware datetimes are not supported by openpyxl)
     try:
         import openpyxl
         from openpyxl.styles import Font, Alignment
         from openpyxl.formatting.rule import ColorScaleRule
+        df_xl = _sanitize_for_excel(df)
         with pd.ExcelWriter(XLSX_PATH, engine="openpyxl") as xw:
-            df.to_excel(xw, sheet_name="watchlist", index=False)
-            ws = xw.book["watchlist"]
+            df_xl.to_excel(xw, sheet_name="watchlist", index=False)
+            ws = xw.sheets["watchlist"]
+            # Auto width
             for col in ws.columns:
                 max_len = max((len(str(c.value)) for c in col), default=10)
                 ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 30)
+            # Header bold + center
             for cell in ws[1]:
                 cell.font = Font(bold=True)
                 cell.alignment = Alignment(horizontal="center")
+            # Conditional formatting on return columns
             for ret_col in ("ret_from_prev_close_pct", "ret_from_t1_open_pct"):
-                if ret_col in df.columns:
-                    ci = df.columns.get_loc(ret_col) + 1
+                if ret_col in df_xl.columns:
+                    ci = df_xl.columns.get_loc(ret_col) + 1
                     letter = openpyxl.utils.get_column_letter(ci)
-                    cell_range = f"{letter}2:{letter}{len(df) + 1}"
+                    cell_range = f"{letter}2:{letter}{len(df_xl) + 1}"
                     rule = ColorScaleRule(
                         start_type="num", start_value=-10, start_color="F8696B",
                         mid_type="num", mid_value=0, mid_color="FFFFFF",
                         end_type="num", end_value=10, end_color="63BE7B",
                     )
                     ws.conditional_formatting.add(cell_range, rule)
-        print(f"[out] {XLSX_PATH}")
+        # Verify by reading the file back
+        check = pd.read_excel(XLSX_PATH, sheet_name="watchlist")
+        if len(check) != len(df_xl):
+            raise RuntimeError(
+                f"xlsx round-trip mismatch: wrote {len(df_xl)} rows, "
+                f"read back {len(check)}"
+            )
+        print(f"[out] {XLSX_PATH}  (verified: {len(check)} rows readable)")
     except Exception as e:
-        print(f"[warn] xlsx skipped: {e}")
+        import traceback
+        print(f"[ERROR] xlsx write FAILED: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        print(f"        Parquet + CSV are still complete at:")
+        print(f"          {SNAPSHOT_PARQUET}")
+        print(f"          {csv_path}")
 
 
 # =============================================================================
