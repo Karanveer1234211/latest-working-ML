@@ -1,0 +1,22 @@
+# Core
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+pyarrow>=14.0
+
+# US data + broker
+alpaca-py>=0.30
+pandas_market_calendars>=4.4
+
+# Optional but used
+requests>=2.31
+urllib3>=2.0
+
+# Model layer (used by upcoming new_model.py port)
+scikit-learn>=1.3
+lightgbm>=4.0
+joblib>=1.3
+tqdm>=4.65
+
+# Reporting
+openpyxl>=3.1
