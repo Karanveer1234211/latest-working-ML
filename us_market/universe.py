@@ -40,9 +40,15 @@ warnings.filterwarnings("ignore")
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
+#
+# All US data lives INSIDE the us_market/ package by default. The Indian
+# pipeline writes to its own paths (C:\Users\karanvsi\Desktop\Kite Connect\...
+# or whatever the user configured); the US port writes to us_market/data/.
+# Override via env var US_CACHE_DIR if you want a different root.
 
+PACKAGE_DIR = Path(__file__).resolve().parent      # .../us_market
 DEFAULT_CACHE_DIR = Path(os.environ.get("US_CACHE_DIR",
-                          str(Path.home() / "us_market_cache"))).expanduser()
+                          str(PACKAGE_DIR / "data"))).expanduser()
 DEFAULT_UNIVERSE_FILE = DEFAULT_CACHE_DIR / "universe.txt"
 DEFAULT_UNIVERSE_META = DEFAULT_CACHE_DIR / "universe_meta.json"
 

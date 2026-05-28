@@ -39,7 +39,9 @@ swapped from Zerodha Kite Connect to Alpaca.
 pip install -r requirements.txt
 export ALPACA_API_KEY=...
 export ALPACA_SECRET_KEY=...
-export US_CACHE_DIR=~/us_market_cache  # optional, defaults to ~/us_market_cache
+# Optional: override the default cache dir.
+# Default is us_market/data/ (lives inside this package).
+# export US_CACHE_DIR=/some/other/path
 
 # 1. Build/refresh universe (S&P 500 + Russell 1000, deduped)
 python universe.py --rebuild
@@ -52,10 +54,38 @@ python daily_cache.py --years 6
 
 # 4. Backfill intraday 5-min for last 2 years
 python intraday_cache.py --years 2
-
-# Once data layer is hydrated, the model layer (next PR) just consumes
-# these parquets exactly as the Indian model consumes the Indian ones.
 ```
+
+## Isolation guarantees
+
+The US code is fully scoped to `us_market/`:
+
+  * **No edits to any Indian file.** Verified by `git diff main..us-market-foundation`:
+    every changed path is under `us_market/`.
+  * **All data goes under `us_market/data/`** by default:
+    ```
+    us_market/data/
+    ├── universe.txt                       (S&P 500 + R1000 list)
+    ├── universe_meta.json
+    ├── macro_cache.parquet                (SPY + VIX)
+    ├── daily/                             (one parquet per symbol + .ok.json)
+    │   ├── AAPL_daily.parquet
+    │   ├── AAPL_daily.ok.json
+    │   └── ...
+    └── intraday_5min/                     (one parquet per symbol + .ok.json)
+        ├── AAPL.parquet
+        ├── AAPL.ok.json
+        └── ...
+    ```
+  * **All env vars are `US_*` prefixed** (`US_CACHE_DIR`, `US_DAILY_ROOT`,
+    `US_INTRADAY_ROOT`, `US_GLOBAL_PATH`, `US_VIX_SOURCE`) so they cannot
+    collide with the Indian pipeline's `CACHE_BASE_DIR`, `KITE_TOKEN_FILE`,
+    etc.
+  * **`us_market/data/` is gitignored** so cache artefacts never show up in
+    PRs.
+
+The Indian pipeline can keep running against its own paths (e.g.
+`C:\Users\karanvsi\Desktop\Kite Connect\...`) with zero changes.
 
 ## Decisions worth knowing
 

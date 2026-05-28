@@ -53,7 +53,8 @@ import numpy as np
 import pandas as pd
 
 # Local
-from universe import sanitize_symbol, filename_safe, load_universe
+from universe import (sanitize_symbol, filename_safe, load_universe,
+                       PACKAGE_DIR, DEFAULT_CACHE_DIR)
 
 # alpaca-py
 try:
@@ -102,8 +103,8 @@ def _pytz_et():
 SCHEMA_VERSION = 100  # US baseline; Indian original uses 19
 OK_VERSION_KEY = "schema_version"
 
-DEFAULT_CACHE_DIR = Path(os.environ.get("US_CACHE_DIR",
-                          str(Path.home() / "us_market_cache"))).expanduser()
+# DEFAULT_CACHE_DIR comes from universe.py and resolves to us_market/data/
+# unless overridden by env US_CACHE_DIR.
 
 
 def _default_daily_root() -> Path:
