@@ -98,6 +98,22 @@ DAILY_SRC = Path(os.environ.get("DAILY_CACHE_SRC", str(DEFAULT_DAILY_SRC)))
 INTRADAY_SRC = Path(os.environ.get("INTRADAY_CACHE_SRC", str(DEFAULT_INTRADAY_SRC)))
 
 # =============================================================================
+# CACHE OUTPUT PATHS  (explicit so they're never ambiguous)
+# =============================================================================
+# These match the paths the originals already write to. Keeping them pinned
+# here lets us:
+#   (a) print exactly where the engine is writing at startup
+#   (b) accept CLI / env overrides without editing either original file
+#   (c) keep the intraday module's derived paths (_instrument_map.parquet,
+#       _cache_metadata.parquet, _failures.csv) in lock-step with INTRADAY_DIR
+
+WIN_BASE = Path(r"C:\Users\karanvsi\Desktop\Pycharm\Cache")
+DEFAULT_DAILY_OUT = Path(os.environ.get("CACHE_DAILY_ROOT",
+                                          str(WIN_BASE / "cache_daily_new")))
+DEFAULT_INTRADAY_OUT = Path(os.environ.get("INTRADAY_DIR",
+                                             str(WIN_BASE / "intraday_5min")))
+
+# =============================================================================
 # Module loaders (importlib because of the space in filenames)
 # =============================================================================
 
@@ -133,6 +149,21 @@ def _ensure_intraday():
     if _ic_module is None:
         _ic_module = _load_module("intraday_cache_orig", INTRADAY_SRC)
     return _ic_module
+
+
+def _override_intraday_dir(ic_mod, new_path: Path) -> Path:
+    """
+    Redirect intraday cache outputs to a different directory WITHOUT
+    editing the original `latest intraday cache.py`. Updates INTRADAY_DIR
+    and its three derived paths in lock-step.
+    """
+    new_path = Path(new_path).expanduser()
+    new_path.mkdir(parents=True, exist_ok=True)
+    ic_mod.INTRADAY_DIR = new_path
+    ic_mod.INSTRUMENT_MAP_PATH = new_path / "_instrument_map.parquet"
+    ic_mod.CACHE_METADATA_PATH = new_path / "_cache_metadata.parquet"
+    ic_mod.FAILURE_LOG_PATH = new_path / "_failures.csv"
+    return new_path
 
 
 # =============================================================================
@@ -276,6 +307,7 @@ def run_daily(symbols: List[str], *, years: float = 6.0,
               start_date: Optional[dt.date] = None,
               end_date: Optional[dt.date] = None,
               out_dir: Optional[Path] = None) -> Dict[str, str]:
+    """run_daily uses DEFAULT_DAILY_OUT when out_dir is None."""
     """
     Drive the daily cache build with a 3-stage pipeline:
       stage 1 (I/O thread):  fetch raw bars
@@ -286,15 +318,14 @@ def run_daily(symbols: List[str], *, years: float = 6.0,
       "ok", "current", "no_new_data", "empty", "skipped: ...", "error: ..."
     """
     dc = _ensure_daily()
-    cfg_overrides: dict = {}
-    if out_dir:
-        cfg_overrides["daily_root"] = Path(out_dir).expanduser()
-    cfg = dc.Config.from_env(**cfg_overrides)
+    daily_root = Path(out_dir).expanduser() if out_dir else DEFAULT_DAILY_OUT
+    cfg = dc.Config.from_env(daily_root=daily_root)
     cfg = cfg.with_updates(
         max_workers=int(io_workers),
         rate_limit_per_sec=float(rate_limit_per_sec),
     )
     cfg.day_root().mkdir(parents=True, exist_ok=True)
+    print(f"[daily] output dir   : {cfg.day_root()}")
 
     # Resolve dates
     if end_date is None:
@@ -521,7 +552,8 @@ def _run_daily_recompute_only(symbols: List[str], cfg, cpu_workers: Optional[int
 def run_intraday(symbols: List[str], *, years: float = 5.0,
                   force_full: bool = False,
                   io_workers: int = 8,
-                  rate_limit_per_sec: float = 3.0) -> Dict[str, str]:
+                  rate_limit_per_sec: float = 3.0,
+                  out_dir: Optional[Path] = None) -> Dict[str, str]:
     """
     Drive the intraday cache build with a thread pool sharing a global
     rate limiter. Calls the same `cache_symbol`/`fetch_symbol_bars` from
@@ -530,9 +562,15 @@ def run_intraday(symbols: List[str], *, years: float = 5.0,
     ic = _ensure_intraday()
     dc = _ensure_daily()  # for shared RateLimiter class
 
+    target_intraday = Path(out_dir).expanduser() if out_dir else DEFAULT_INTRADAY_OUT
+    _override_intraday_dir(ic, target_intraday)
+
     print(f"[intraday] {len(symbols)} symbols  years={years}  force={force_full}")
     print(f"[intraday] io_workers={io_workers}  rate_limit={rate_limit_per_sec}/s")
-    print(f"[intraday] output: {ic.INTRADAY_DIR}")
+    print(f"[intraday] output dir         : {ic.INTRADAY_DIR}")
+    print(f"[intraday] instrument map     : {ic.INSTRUMENT_MAP_PATH}")
+    print(f"[intraday] metadata           : {ic.CACHE_METADATA_PATH}")
+    print(f"[intraday] failure log        : {ic.FAILURE_LOG_PATH}")
 
     kite = ic.get_kite_client()
     instrument_map = ic.load_or_fetch_instrument_map(kite)
@@ -667,9 +705,13 @@ def main():
     ap.add_argument("--rate-limit", type=float, default=None,
                     help="API rate cap per second (default: 32 daily, 3 intraday)")
 
-    # Paths (uncommon)
-    ap.add_argument("--out-dir", type=str, default=None,
-                    help="(daily) override CACHE_DAILY_ROOT for this run")
+    # Output paths -- defaults match the originals on Windows.
+    ap.add_argument("--daily-out-dir", "--out-dir", dest="daily_out_dir",
+                    type=str, default=str(DEFAULT_DAILY_OUT),
+                    help=f"(daily) cache output dir (default: {DEFAULT_DAILY_OUT})")
+    ap.add_argument("--intraday-out-dir", dest="intraday_out_dir",
+                    type=str, default=str(DEFAULT_INTRADAY_OUT),
+                    help=f"(intraday) cache output dir (default: {DEFAULT_INTRADAY_OUT})")
 
     args = ap.parse_args()
 
@@ -684,6 +726,15 @@ def main():
     intraday_years = (args.intraday_years if args.intraday_years is not None
                        else args.years)
 
+    print(f"\n{'=' * 78}")
+    print(f"cache_engine.py  mode={args.mode}")
+    print(f"  symbols       : {len(syms)}")
+    if args.mode in ("daily", "both"):
+        print(f"  daily output  : {args.daily_out_dir}")
+    if args.mode in ("intraday", "both"):
+        print(f"  intraday out  : {args.intraday_out_dir}")
+    print(f"{'=' * 78}\n")
+
     if args.mode in ("daily", "both"):
         daily_io = args.io_workers if args.io_workers is not None else 32
         daily_rl = args.rate_limit if args.rate_limit is not None else 32.0
@@ -693,7 +744,7 @@ def main():
             io_workers=daily_io, cpu_workers=args.cpu_workers,
             rate_limit_per_sec=daily_rl,
             start_date=parse_d(args.start), end_date=parse_d(args.end),
-            out_dir=Path(args.out_dir) if args.out_dir else None,
+            out_dir=Path(args.daily_out_dir),
         )
 
     if args.mode in ("intraday", "both"):
@@ -704,6 +755,7 @@ def main():
             force_full=args.force_full,
             io_workers=intraday_io,
             rate_limit_per_sec=intraday_rl,
+            out_dir=Path(args.intraday_out_dir),
         )
 
 
